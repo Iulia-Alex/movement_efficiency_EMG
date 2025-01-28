@@ -1,0 +1,475 @@
+import os
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import scipy.signal as signal
+from sklearn.mixture import GaussianMixture as GMM
+from sklearn.cluster import KMeans as KMM
+from sklearn import datasets as SKdata
+from sklearn.svm import SVC
+from sklearn.model_selection import StratifiedKFold as KfCV
+from sklearn.metrics import confusion_matrix
+from scipy.optimize import linear_sum_assignment
+
+def calculate_mav(signal, window_size, overlap):
+    mav_values = []
+    step_size = window_size - overlap
+    for i in range(0, len(signal) - window_size, step_size):
+        window = signal[i:i + window_size]
+        mav_values.append(np.mean(np.abs(window)))  
+    return np.array(mav_values)
+
+
+def detect_activation_intervals_adaptive(mav_data, threshold_factor=1.5, window_size=50):
+    activation_intervals = []
+    activation_amplitudes = []
+
+    for channel in range(mav_data.shape[0]):
+        channel_data = mav_data[channel, :]
+        starts = []
+        ends = []
+        amplitudes = []
+        is_active = False
+
+        for i in range(window_size//2,len(channel_data)):
+            start_idx = max(0, i - window_size)
+            end_idx = i
+            
+            if start_idx != end_idx:
+                baseline_mean = np.mean(channel_data[start_idx:end_idx])
+                baseline_std = np.std(channel_data[start_idx:end_idx])
+
+                threshold = baseline_mean + threshold_factor * baseline_std
+
+                if channel_data[i] > threshold and not is_active:
+                    starts.append(i)
+                    is_active = True
+                elif channel_data[i] <= threshold and is_active:
+                    ends.append(i)
+                    is_active = False
+
+        if is_active:
+            ends.append(len(channel_data) - 1)
+
+        starts, ends = merge_intervals(starts, ends, gap=4)
+
+        for start, end in zip(starts, ends):
+            amplitudes.append(channel_data[start:end])
+        
+        activation_intervals.append((starts, ends))
+        activation_amplitudes.append(amplitudes)
+
+    return activation_intervals, activation_amplitudes
+
+
+def merge_intervals(starts, ends, gap=3):
+    merged_starts = []
+    merged_ends = []
+
+    if len(starts) == 0:
+        return starts, ends
+
+    current_start = starts[0]
+    current_end = ends[0]
+
+    for i in range(1, len(starts)):
+        if starts[i] - current_end <= gap:
+            current_end = ends[i]
+        else:
+            merged_starts.append(current_start)
+            merged_ends.append(current_end)
+            current_start = starts[i]
+            current_end = ends[i]
+
+    merged_starts.append(current_start)
+    merged_ends.append(current_end)
+
+    return merged_starts, merged_ends
+
+def calculate_activation_metrics(mav_data, activation_intervals, activation_amplitudes):
+    activation_metrics = []
+
+    for channel in range(mav_data.shape[0]):
+        channel_metrics = []
+
+        starts, ends = activation_intervals[channel]
+        amplitudes = activation_amplitudes[channel]
+
+        for start, end, amp in zip(starts, ends, amplitudes):
+            duration = (end - start) * 60 / 1180 # seconds
+            amplitude_sum = np.max(amp)
+            if amplitude_sum > 0:
+                metric = duration / amplitude_sum
+            else:
+                metric = 0
+            channel_metrics.append(metric)
+
+        activation_metrics.append(channel_metrics)
+
+    return activation_metrics
+
+
+def codeOneHot(Y_int):
+    DB_size = Y_int.shape[0]
+    Y_onehot = np.zeros((DB_size, Kclass))
+    for i in range(0, DB_size):
+        Y_onehot[i,Y_int[i]] = 1
+    return Y_onehot
+
+def getUA(OUT, TAR):
+    Kclass = OUT.shape[1]
+    VN = np.sum(TAR, axis=0)
+    aux = TAR - OUT
+    WN = np.sum((aux + np.absolute(aux))//2, axis=0)
+    CN = VN - WN
+    UA = np.round(np.sum(CN/VN)/Kclass*100, decimals=1)
+    return UA
+
+def getWA(OUT, TAR):
+    DB_size = OUT.shape[0]
+    OUT = np.argmax(OUT, axis=1)
+    TAR = np.argmax(TAR, axis=1)
+    hits = np.sum(OUT == TAR)
+    WA = np.round(hits/DB_size*100, decimals=1)
+    return WA
+
+if __name__ == "__main__":
+    plt.close('all')
+    folder_path = ".\Hand"
+
+    for file_name in os.listdir(folder_path):
+        if file_name.endswith(".npy"):
+            file_path = os.path.join(folder_path, file_name)
+            print(file_name)
+    
+            data = np.load(file_path)
+            fs = 512
+            start_time = 0 * fs
+            end_time = 60 * fs
+            num_channels = data.shape[0]
+            # print(num_channels)
+            time = np.arange(start_time, end_time)
+
+            fig, axs = plt.subplots(num_channels, 1, figsize=(10, 6), sharex=True)
+            fig.suptitle("Semnale EMG", fontsize=16)
+
+            for i in range(num_channels):
+                axs[i].plot(time, data[i, start_time:end_time], label=f'Canal {i}')
+                axs[i].set_ylabel(f'Canal {i}')
+                axs[i].grid(True)
+                axs[i].legend(loc="upper right", fontsize=8)
+
+            axs[-1].set_xlabel("Timp")
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            
+            notch_freq = 50  
+            bandpass_low = 10  
+            bandpass_high = 150  
+
+            b_notch, a_notch = signal.iirnotch(notch_freq, Q=30, fs=fs)
+            data_notched = signal.filtfilt(b_notch, a_notch, data, axis=1)
+
+            b_band, a_band = signal.butter(4, [bandpass_low, bandpass_high], btype='band', fs=fs)
+            data_filtered = signal.filtfilt(b_band, a_band, data_notched, axis=1)
+            
+            fig, axs = plt.subplots(num_channels, 1, figsize=(10, 6), sharex=True)
+            fig.suptitle("Semnale EMG Filtrate", fontsize=16)
+
+            for i in range(num_channels):
+                axs[i].plot(time, data_filtered[i, start_time:end_time], label=f'Canal {i}')
+                axs[i].set_ylabel(f'Canal {i}')
+                axs[i].grid(True)
+                axs[i].legend(loc="upper right", fontsize=8)
+
+            axs[-1].set_xlabel("Timp")
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            
+            mean = np.mean(data_filtered, axis=1, keepdims=True)
+            std = np.std(data_filtered, axis=1, keepdims=True)
+            print("Media:", mean)
+            print("Dispersia:", std)
+            
+            threshold_factor = 7.5
+            upper_threshold = mean + threshold_factor * std
+            lower_threshold = mean - threshold_factor * std
+
+            outliers = (data_filtered > upper_threshold) | (data_filtered < lower_threshold)
+            print("Outliers:", outliers)
+            print(outliers.shape)
+
+            for i in range(0, num_channels):
+                for j in range(len(data_filtered[i])):
+                    if outliers[i, j] == True:
+                        if 1 < j < len(data_filtered[i]) - 1:
+                            data_filtered[i, j] = np.sum(data_filtered[i,j-15:j+15]) / 30
+                        elif j == 0:
+                            data_filtered[i, j] = data[i,j + 1]
+                        elif j == len(data_filtered[i]) - 1:
+                            data_filtered[i, j] = data[i,j - 1]
+
+            
+            data_normalised = (data_filtered - mean) / std # normalizare
+            
+            mean = np.mean(data_normalised, axis=1, keepdims=True)
+            std = np.std(data_normalised, axis=1, keepdims=True)
+            print("Media:", mean)
+            print("Dispersia:", std)
+            
+            fig, axs = plt.subplots(num_channels, 1, figsize=(10, 6), sharex=True)
+            fig.suptitle("Semnale EMG Normalizate", fontsize=16)
+
+            for i in range(num_channels):
+                axs[i].plot(time, data_normalised[i, start_time:end_time], label=f'Canal {i}')
+                axs[i].set_ylabel(f'Canal {i}')
+                axs[i].grid(True)
+                axs[i].legend(loc="upper right", fontsize=8)
+
+            axs[-1].set_xlabel("Timp")
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            
+            window_size = int(fs * 0.1)  
+            overlap = int(window_size * 0.5) 
+
+            mav_values = []
+            
+            for i in range(num_channels):
+                mav_values.append(calculate_mav(data_normalised[i, start_time:end_time], window_size, overlap))
+            
+            print("MAV shape:", mav_values[0].shape)
+            
+            fig, axs = plt.subplots(num_channels, 1, figsize=(10, 6), sharex=True)
+            fig.suptitle("Activare Musculară - MAV", fontsize=16)
+            for i in range(num_channels):
+                axs[i].plot(mav_values[i], label=f'Canal {i}')
+                axs[i].set_ylabel(f'Canal {i}')
+                axs[i].grid(True)
+                axs[i].legend(loc="upper right", fontsize=8)
+            axs[-1].set_xlabel("Fereastră de timp")
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            
+            mav_values = np.array(mav_values)
+            intervals, amplitudes = detect_activation_intervals_adaptive(mav_values, threshold_factor=1, window_size=20)
+            
+            filtered_intervals = []
+            filtered_amplitudes = []
+
+            for channel_idx in range(len(intervals)):
+                starts = intervals[channel_idx][0]
+                ends = intervals[channel_idx][1]
+                amplitudes_channel = amplitudes[channel_idx]
+
+                filtered_starts = []
+                filtered_ends = []
+                filtered_amplitudes_channel = []
+
+                for i in range(len(starts)):
+                    if starts[i] != ends[i]:
+                        filtered_starts.append(starts[i])
+                        filtered_ends.append(ends[i])
+                        filtered_amplitudes_channel.append(amplitudes_channel[i])
+
+                filtered_intervals.append((filtered_starts, filtered_ends))
+                filtered_amplitudes.append(filtered_amplitudes_channel)
+
+            intervals = filtered_intervals
+            amplitudes = filtered_amplitudes
+            
+            num_channels = mav_values.shape[0]
+            time = np.arange(mav_values.shape[1])
+
+            fig, axs = plt.subplots(num_channels, 1, figsize=(15, num_channels * 3))
+
+            if num_channels == 1:
+                axs = [axs]
+
+            for channel in range(num_channels):
+                ax = axs[channel]
+                ax.plot(time, mav_values[channel], label=f'Channel {channel}')
+
+                starts, ends = intervals[channel]
+
+                for start, end in zip(starts, ends):
+                    ax.axvspan(start, end, color='red', alpha=0.3)
+
+                ax.set_title(f'Channel {channel}')
+                ax.set_xlabel('Time')
+                ax.set_ylabel('Amplitude')
+                ax.legend()
+
+            plt.tight_layout()
+            
+            max_amplitudes = []
+            for i in range(num_channels):
+                max_channel = []
+                for j in range(len(amplitudes[i])):
+                    max_channel.append((intervals[i][1][j] - intervals[i][0][j]) / np.sum(amplitudes[i][j]))
+                max_amplitudes.append(max_channel)
+
+            labels_all_channels = []
+            true_labels = []
+
+            for channel in range(num_channels):
+                feature_matrix = np.array(max_amplitudes[channel]).reshape(-1, 1)
+                MODEL = KMM(n_clusters=3, n_init="auto")
+                MODEL.fit(feature_matrix)
+                labels = MODEL.predict(feature_matrix)  
+                X = feature_matrix
+                global_max_channel = np.max(max_amplitudes[channel])
+                true_labels_channel = []
+                
+                for i in range(len(max_amplitudes[channel])):
+                    if max_amplitudes[channel][i] <= 0.5* global_max_channel:
+                        true_labels_channel.append(0)
+                    elif max_amplitudes[channel][i] <= 0.75 * global_max_channel:
+                        true_labels_channel.append(1)
+                    else:
+                        true_labels_channel.append(2)
+                true_labels.append(true_labels_channel)
+
+                Y = np.array(true_labels_channel).reshape(-1, 1)
+                N = X.shape[0]
+                Kclass = 3
+                Nclass = np.sum(codeOneHot(Y), axis=0)
+                labels = np.array(labels).reshape(-1, 1)
+
+                conf_matrix = confusion_matrix(Y.flatten(), labels.flatten())
+
+                row_ind, col_ind = linear_sum_assignment(-conf_matrix)
+                mapping = {col: row for row, col in zip(row_ind, col_ind)}
+                labels_corrected = np.array([mapping[label] for label in labels.flatten()])
+                labels_all_channels.append(labels_corrected.tolist())
+                labels_corrected = labels_corrected.reshape(labels.shape)
+
+                UA_val = getUA(codeOneHot(Y), codeOneHot(labels_corrected))  # Y e true labels
+                WA_val = getWA(codeOneHot(Y), codeOneHot(labels_corrected))
+                
+                print('Channel:' + str(channel) + '\n')
+                print('Metrics:\n' +
+                    '-> UA (val) = %.1f%%\n' % UA_val +
+                    '-> WA (val) = %.1f%%' % WA_val)
+                print('')
+
+            time = np.arange(mav_values.shape[1])
+
+            fig, axs = plt.subplots(num_channels, 1, figsize=(15, num_channels * 3))
+            fig.suptitle("Etichetare KMM", fontsize=16)
+
+            if num_channels == 1:
+                axs = [axs]
+
+            colors = ['blue', 'red', 'green']
+
+            for channel in range(num_channels):
+                ax = axs[channel]
+                ax.plot(time, mav_values[channel], label=f'Channel {channel}')
+
+                starts = intervals[channel][0]
+                ends = intervals[channel][1]
+                labels = labels_all_channels[channel]
+
+                for i, (start, end) in enumerate(zip(starts, ends)):
+                    if i < len(labels):
+                        label = labels[i]
+                        color = colors[label]
+                        ax.axvspan(start, end, color=color, alpha=0.3)
+
+                ax.set_title(f'Channel {channel}')
+                ax.set_xlabel('Time')
+                ax.set_ylabel('Amplitude')
+                ax.legend()
+            plt.tight_layout()
+                
+            fig, axs = plt.subplots(num_channels, 1, figsize=(15, num_channels * 3))
+            fig.suptitle("Etichetare manuala", fontsize=16)
+
+            if num_channels == 1:
+                axs = [axs]
+
+            # colors = ['blue', 'red', 'green']
+
+            for channel in range(num_channels):
+                ax = axs[channel]
+                ax.plot(time, mav_values[channel], label=f'Channel {channel}')
+
+                starts = intervals[channel][0]
+                ends = intervals[channel][1]
+                labels = true_labels[channel]
+                for i, (start, end) in enumerate(zip(starts, ends)):
+                    if i < len(labels):
+                        label = labels[i]
+                        color = colors[label]
+                        ax.axvspan(start, end, color=color, alpha=0.3)
+
+                ax.set_title(f'Channel {channel}')
+                ax.set_xlabel('Time')
+                ax.set_ylabel('Amplitude')
+                ax.legend()
+            plt.tight_layout()
+            plt.show()
+
+            fig, axs = plt.subplots(2, 1, figsize=(8, 2 * 3))
+
+            channel = 6
+            ax = axs[0]
+            ax.plot(time, mav_values[channel], label=f'Channel {channel}')
+
+            starts = intervals[channel][0]
+            ends = intervals[channel][1]
+            labels = labels_all_channels[channel]
+            for i, (start, end) in enumerate(zip(starts, ends)):
+                if i < len(labels):
+                    label = labels[i]
+                    color = colors[label]
+                    ax.axvspan(start, end, color=color, alpha=0.3)
+
+            ax.set_title(f'KMM Labeling - Channel {channel}')
+            ax.set_xlabel('Time')
+            ax.set_ylabel('Amplitude')
+            ax.legend()
+
+            ax = axs[1]
+            ax.plot(time, mav_values[channel], label=f'Channel {channel}')
+
+            starts = intervals[channel][0]
+            ends = intervals[channel][1]
+            labels = true_labels[channel]
+            for i, (start, end) in enumerate(zip(starts, ends)):
+                if i < len(labels):
+                    label = labels[i]
+                    color = colors[label]
+                    ax.axvspan(start, end, color=color, alpha=0.3)
+
+            ax.set_title(f'Labeling based on thresholding - Channel {channel}')
+            ax.set_xlabel('Time')
+            ax.set_ylabel('Amplitude')
+            ax.legend()
+            plt.tight_layout()
+            # plt.show()
+            
+            
+            res = signal.resample(mav_values.T, 512*60)
+            print(res.shape)
+            res = res.T
+            fig, axs = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+            fig.suptitle("EMG and MAV plot", fontsize=16)
+            i = 0
+            axs[i].plot(res[i], label=f'Channel {i}')
+            axs[i].set_ylabel(f'Channel {i}')
+            axs[i].grid(True)
+            axs[i].legend(loc="upper right", fontsize=8)
+            starts = intervals[i][0]
+            ends = intervals[i][1]
+            labels = true_labels[i]
+
+            for j, (start, end) in enumerate(zip(starts, ends)):
+                if j < len(labels):
+                    label = labels[j]
+                    color = colors[label]
+                    ax.axvspan(start, end, color=color, alpha=0.3)
+            axs[i+1].plot(data_normalised[i], label=f'Channel {i}')
+            axs[i+1].set_ylabel(f'Channel {i}')
+            axs[i+1].grid(True)
+            axs[i+1].legend(loc="upper right", fontsize=8)
+            axs[-1].set_xlabel("Samples")
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.show()
