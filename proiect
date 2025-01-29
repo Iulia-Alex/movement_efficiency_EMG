@@ -136,6 +136,9 @@ def getWA(OUT, TAR):
 if __name__ == "__main__":
     plt.close('all')
     folder_path = ".\Hand"
+    mean_UA = 0
+    mean_WA = 0
+    nr_rec = 0
 
     for file_name in os.listdir(folder_path):
         if file_name.endswith(".npy"):
@@ -186,16 +189,16 @@ if __name__ == "__main__":
             
             mean = np.mean(data_filtered, axis=1, keepdims=True)
             std = np.std(data_filtered, axis=1, keepdims=True)
-            print("Media:", mean)
-            print("Dispersia:", std)
+            # print("Media:", mean)
+            # print("Dispersia:", std)
             
             threshold_factor = 7.5
             upper_threshold = mean + threshold_factor * std
             lower_threshold = mean - threshold_factor * std
 
             outliers = (data_filtered > upper_threshold) | (data_filtered < lower_threshold)
-            print("Outliers:", outliers)
-            print(outliers.shape)
+            # print("Outliers:", outliers)
+            # print(outliers.shape)
 
             for i in range(0, num_channels):
                 for j in range(len(data_filtered[i])):
@@ -212,8 +215,8 @@ if __name__ == "__main__":
             
             mean = np.mean(data_normalised, axis=1, keepdims=True)
             std = np.std(data_normalised, axis=1, keepdims=True)
-            print("Media:", mean)
-            print("Dispersia:", std)
+            # print("Media:", mean)
+            # print("Dispersia:", std)
             
             fig, axs = plt.subplots(num_channels, 1, figsize=(10, 6), sharex=True)
             fig.suptitle("Semnale EMG Normalizate", fontsize=16)
@@ -235,7 +238,7 @@ if __name__ == "__main__":
             for i in range(num_channels):
                 mav_values.append(calculate_mav(data_normalised[i, start_time:end_time], window_size, overlap))
             
-            print("MAV shape:", mav_values[0].shape)
+            # print("MAV shape:", mav_values[0].shape)
             
             fig, axs = plt.subplots(num_channels, 1, figsize=(10, 6), sharex=True)
             fig.suptitle("Activare Musculară - MAV", fontsize=16)
@@ -342,6 +345,9 @@ if __name__ == "__main__":
 
                 UA_val = getUA(codeOneHot(Y), codeOneHot(labels_corrected))  # Y e true labels
                 WA_val = getWA(codeOneHot(Y), codeOneHot(labels_corrected))
+                mean_UA += UA_val
+                mean_WA += WA_val
+                nr_rec += 1
                 
                 print('Channel:' + str(channel) + '\n')
                 print('Metrics:\n' +
@@ -405,7 +411,7 @@ if __name__ == "__main__":
                 ax.set_ylabel('Amplitude')
                 ax.legend()
             plt.tight_layout()
-            plt.show()
+            # plt.show()
 
             fig, axs = plt.subplots(2, 1, figsize=(8, 2 * 3))
 
@@ -448,7 +454,7 @@ if __name__ == "__main__":
             
             
             res = signal.resample(mav_values.T, 512*60)
-            print(res.shape)
+            # print(res.shape)
             res = res.T
             fig, axs = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
             fig.suptitle("EMG and MAV plot", fontsize=16)
@@ -472,4 +478,7 @@ if __name__ == "__main__":
             axs[i+1].legend(loc="upper right", fontsize=8)
             axs[-1].set_xlabel("Samples")
             plt.tight_layout(rect=[0, 0, 1, 0.96])
-            plt.show()
+            # plt.show()
+
+    print('Mean Unweighted Accuracy Value:', mean_UA / (nr_rec * 8))
+    print('Mean Weighted Accuracy Value:', mean_WA / (nr_rec * 8))
